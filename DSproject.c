@@ -1,611 +1,446 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#define HASH_SIZE 100
+
 #define MAX_NAME 50
 #define MAX_DESC 100
+#define FILE_INVENTORY "inventory.txt"
+#define FILE_DELIVERIES "deliveries.txt"
+#define FILE_USERS "users.txt"
+#define LOW_STOCK_LIMIT 5   // Threshold for low stock warning
 
-typedef struct Product
- {
-   int id;
+// ---------- PRODUCT ----------
+typedef struct {
+    int id;
     char name[MAX_NAME];
     int quantity;
     float price;
     char description[MAX_DESC];
-}Product;
+} Product;
 
-typedef struct HashNode 
- {
-    Product product;
-    struct HashNode* next;
-}HashNode;
-
-typedef struct 
-{
-    HashNode* table[HASH_SIZE];
-}HashTable;
-
-typedef struct AVLNode
-  {
+// ---------- AVL NODE ----------
+typedef struct AVLNode {
     Product product;
     struct AVLNode* left;
     struct AVLNode* right;
-  int height;
-}AVLNode;
+    int height;
+} AVLNode;
 
-typedef struct QueueNode 
- {
-   int orderId;
+// ---------- QUEUE ----------
+typedef struct QueueNode {
+    int orderId;
     int productId;
     int quantity;
     char customerName[MAX_NAME];
     struct QueueNode* next;
-}QueueNode;
+} QueueNode;
 
-typedef struct
- {
-   QueueNode* front;
+typedef struct {
+    QueueNode* front;
     QueueNode* rear;
     int count;
 } Queue;
 
-typedef struct PQNode
- {
-    int orderId;
-    int productId;
-    int quantity;
-    int priority; // 1=Urgent, 2=Express, 3=Normal
-    char customerName[MAX_NAME];
-    struct PQNode* next;
-}PQNode;
-
-typedef struct 
- {
-    PQNode* head;
-    int count;
-}PriorityQueue;
-
-HashTable* hashTable;
-AVLNode* avlRoot = NULL;
-Queue* deliveryQueue;
-PriorityQueue* urgentQueue;
 int nextOrderId = 1000;
 
-int hashFunction(int id) 
- { 
- return id%HASH_SIZE; 
+// ---------- AUTH ----------
+typedef struct {
+    char username[MAX_NAME];
+    char password[100]; // plaintext here; replace with hash in production
+    char role[10]; // "admin" or "staff"
+} User;
 
+int isLoggedIn = 0;
+char currentUser[MAX_NAME];
+char currentRole[10];
+
+void strip_newline(char *s){
+    size_t len = strlen(s);
+    if(len>0 && s[len-1]=='\n') s[len-1]='\0';
 }
 
-HashTable* createHashTable()
-  {
-    HashTable* ht=(HashTable*)malloc(sizeof(HashTable));
-    for (int i=0;i<HASH_SIZE;i++) 
-    {
-        ht->table[i]=NULL;
+// Check credentials in users file (plaintext check for demo)
+int authenticateUser(const char* uname, const char* pwd, char* outRole){
+    FILE* f = fopen(FILE_USERS, "r");
+    if(!f) return 0;
+    char line[300];
+    while(fgets(line, sizeof(line), f)){
+        strip_newline(line);
+        if(strlen(line)==0) continue;
+        char *u = strtok(line, ",");
+        char *p = strtok(NULL, ",");
+        char *r = strtok(NULL, ",");
+        if(!u || !p || !r) continue;
+        if(strcmp(u, uname)==0 && strcmp(p, pwd)==0){
+            strcpy(outRole, r);
+            fclose(f);
+            return 1;
+        }
     }
-    return ht;
-}
-
-void hashInsert(HashTable* ht, Product p)
-  {
-    int index=hashFunction(p.id);
-    HashNode* newNode=(HashNode*)malloc(sizeof(HashNode));
-    newNode->product=p;
-    newNode->next=ht->table[index];
-    ht->table[index]=newNode;
-}
-
-Product* hashSearch(HashTable* ht, int id)
- {
-    int index=hashFunction(id);
-    HashNode* current=ht->table[index];
-    while (current!=NULL) 
-    {
-        if (current->product.id==id)
-        {
-    return &(current->product);
-}
-     current=current->next;
-    }
-    return NULL;
-}
-
-int hashDelete(HashTable* ht,int id)
- {
-    int index=hashFunction(id);
-    HashNode* current=ht->table[index];
-    HashNode* prev=NULL;
-
-while(current!=NULL) 
-  {
-if (current->product.id==id)
- {
-    if (prev==NULL)
-    ht->table[index]=current->next;
-else
- prev->next=current->next;
- free(current);
- return 1;
-}
-prev=current;
-current=current->next;
-}
+    fclose(f);
     return 0;
 }
 
-void hashUpdate(HashTable* ht, int id, int quantity, float price)
- {
-    Product* p=hashSearch(ht, id);
-    if (p!=NULL)
- {
-    p->quantity=quantity;
-    p->price=price;
+// Append a new user to file. Caller should ensure only admin calls this.
+int registerUserToFile(const char* uname, const char* pwd, const char* role){
+    // Check if user exists
+    FILE* f = fopen(FILE_USERS, "r");
+    if(f){
+        char line[300];
+        while(fgets(line, sizeof(line), f)){
+            char tmp[300]; strcpy(tmp, line);
+            char *u = strtok(tmp, ",");
+            if(u && strcmp(u, uname)==0){
+                fclose(f);
+                return 0; // user exists
+            }
+        }
+        fclose(f);
     }
+    f = fopen(FILE_USERS, "a");
+    if(!f) return 0;
+    // NOTE: In production, store hashed password instead of plaintext!
+    fprintf(f, "%s,%s,%s\n", uname, pwd, role);
+    fclose(f);
+    return 1;
 }
 
-int max(int a, int b) 
-  { 
-    if(a>b)
-    return a;
-    else
-  return b;
-}
-int height(AVLNode* node) 
-{
-    if(node==NULL)
-    return 0;
-    else
-    return node->height;
- }
+// ---------- AVL UTILITIES ----------
+int height(AVLNode* n){ return n ? n->height : 0; }
+int max(int a,int b){ return a>b?a:b; }
 
-int getBalance(AVLNode* node)
- {
-    if (node==NULL) 
-    return 0;
-   return height(node->left)-height(node->right);
+AVLNode* createNode(Product p){
+    AVLNode* n = malloc(sizeof(AVLNode));
+    n->product = p;
+    n->left = n->right = NULL;
+    n->height = 1;
+    return n;
 }
 
-AVLNode* createAVLNode(Product p) 
- {
-    AVLNode* node=(AVLNode*)malloc(sizeof(AVLNode));
-    node->product=p;
-    node->left=node->right = NULL;
-    node->height=1;
-    return node;
-}
-
-AVLNode* rightRotate(AVLNode* y) 
-  {
-    AVLNode* x=y->left;
-    AVLNode* T2=x->right;
-    x->right=y;
-    y->left=T2;
-    y->height=max(height(y->left),height(y->right))+1;
-    x->height=max(height(x->left),height(x->right))+1;
+AVLNode* rightRotate(AVLNode* y){
+    AVLNode* x = y->left; AVLNode* T2 = x->right;
+    x->right = y; y->left = T2;
+    y->height = max(height(y->left),height(y->right))+1;
+    x->height = max(height(x->left),height(x->right))+1;
     return x;
 }
 
-AVLNode* leftRotate(AVLNode* x) 
- {
-    AVLNode* y=x->right;
-    AVLNode* T2=y->left;
-    y->left=x;
-    x->right=T2;
-    x->height=max(height(x->left),height(x->right))+1;
-    y->height=max(height(y->left),height(y->right))+ 1;
-   return y;
+AVLNode* leftRotate(AVLNode* x){
+    AVLNode* y = x->right; AVLNode* T2 = y->left;
+    y->left = x; x->right = T2;
+    x->height = max(height(x->left),height(x->right))+1;
+    y->height = max(height(y->left),height(y->right))+1;
+    return y;
 }
 
-AVLNode* avlInsert(AVLNode* node,Product p) {
-    if(node==NULL)
-    return createAVLNode(p);
+int getBalance(AVLNode* n){ return n?height(n->left)-height(n->right):0; }
 
-    if(p.id<node->product.id)
-    node->left=avlInsert(node->left, p);
+AVLNode* insertAVL(AVLNode* root, Product p){
+    if(!root) return createNode(p);
+    if(p.id < root->product.id) root->left = insertAVL(root->left,p);
+    else if(p.id > root->product.id) root->right = insertAVL(root->right,p);
+    else{ printf("Product ID already exists!\n"); return root; }
 
-    else if (p.id>node->product.id)
-    node->right=avlInsert(node->right, p);
-    
-    else
-   return node;
+    root->height = 1+max(height(root->left),height(root->right));
+    int bal = getBalance(root);
 
-    node->height=1+max(height(node->left),height(node->right));
-    int balance=getBalance(node);
-
-   if(balance>1 &&p.id<node->left->product.id)
-    return rightRotate(node);
-    if (balance<-1 && p.id>node->right->product.id)
-   return leftRotate(node);
-    if(balance>1 && p.id>node->left->product.id)
-     {
-    node->left=leftRotate(node->left);
-    return rightRotate(node);
-    }
-    if (balance<-1 && p.id<node->right->product.id) 
-     {
-        node->right=rightRotate(node->right);
-        return leftRotate(node);
-    }
-    return node;
-}
-
-AVLNode* minValueNode(AVLNode* node)
- {
-    AVLNode* current=node;
-    while (current->left!=NULL)
-    {
-    current = current->left;
-}
-    return current;
-}
-
-AVLNode* avlDelete(AVLNode* root,int id) {
-    if (root==NULL)
-        return root;
-
-    if (id<root->product.id)
-      root->left=avlDelete(root->left,id);
-    else if (id>root->product.id)
-   root->right = avlDelete(root->right, id);
-    else
-{
-    if((root->left==NULL)||(root->right==NULL))
-     {
-    AVLNode* temp = root->left ? root->left : root->right;
-    if(temp==NULL)
-    {
-    temp=root;
-    root=NULL;
- } 
- else 
-{
- *root = *temp;
-    }
-    free(temp);
- }
-  else
- {
-AVLNode* temp=minValueNode(root->right);
-root->product=temp->product;
-root->right=avlDelete(root->right,temp->product.id);
-}
-}
-
-if(root==NULL)
-  return root;
-
-root->height=1 +max(height(root->left),height(root->right));
-int balance=getBalance(root);
-
-    
-if(balance>1 && getBalance(root->left)>=0)
-    return rightRotate(root);
-    if(balance>1&& getBalance(root->left)<0)
- {
-    root->left=leftRotate(root->left);
-    return rightRotate(root);
-    }
-    if(balance<-1&& getBalance(root->right)<=0)
-  return leftRotate(root);
-    if(balance<-1 &&getBalance(root->right)>0) {
-     root->right=rightRotate(root->right);
-    return leftRotate(root);
-}
+    if(bal>1 && p.id<root->left->product.id) return rightRotate(root);
+    if(bal<-1 && p.id>root->right->product.id) return leftRotate(root);
+    if(bal>1 && p.id>root->left->product.id){ root->left=leftRotate(root->left); return rightRotate(root);}
+    if(bal<-1 && p.id<root->right->product.id){ root->right=rightRotate(root->right); return leftRotate(root);}
     return root;
 }
 
-void inorderTraversal(AVLNode* root)
- {
-   if(root!=NULL) 
-{
- inorderTraversal(root->left);
- printf("ID: %-6d  Name: %-20s  Qty: %-6d  Price: %.2f\n",root->product.id, root->product.name, root->product.quantity, root->product.price);
- inorderTraversal(root->right);
- }
-}
+AVLNode* minValueNode(AVLNode* n){ while(n->left) n=n->left; return n; }
 
-Queue* createQueue()
- {
-    Queue* q=(Queue*)malloc(sizeof(Queue));
-    q->front=q->rear = NULL;
-    q->count=0;
-    return q;
-}
-
-void enqueue(Queue* q,int productId,int quantity,char* customerName)
- {
-    QueueNode* newNode=(QueueNode*)malloc(sizeof(QueueNode));
-    newNode->orderId=nextOrderId++;
-    newNode->productId=productId;
-    newNode->quantity=quantity;
-    strcpy(newNode->customerName,customerName);
-   newNode->next=NULL;
-
-if(q->rear==NULL)
-  q->front=q->rear=newNode;
-else 
-{  
-    q->rear->next = newNode;
-    q->rear = newNode;
+AVLNode* deleteAVL(AVLNode* root,int id){
+    if(!root) return root;
+    if(id<root->product.id) root->left = deleteAVL(root->left,id);
+    else if(id>root->product.id) root->right = deleteAVL(root->right,id);
+    else{
+        if(!root->left||!root->right){
+            AVLNode* tmp = root->left?root->left:root->right;
+            free(root); return tmp;
+        }
+        AVLNode* tmp = minValueNode(root->right);
+        root->product = tmp->product;
+        root->right = deleteAVL(root->right,tmp->product.id);
     }
+
+    root->height = 1+max(height(root->left),height(root->right));
+    int bal = getBalance(root);
+    if(bal>1 && getBalance(root->left)>=0) return rightRotate(root);
+    if(bal>1 && getBalance(root->left)<0){ root->left=leftRotate(root->left); return rightRotate(root);}
+    if(bal<-1 && getBalance(root->right)<=0) return leftRotate(root);
+    if(bal<-1 && getBalance(root->right)>0){ root->right=rightRotate(root->right); return leftRotate(root);}
+    return root;
+}
+
+AVLNode* searchAVL(AVLNode* root,int id){
+    if(!root) return NULL;
+    if(id==root->product.id) return root;
+    return id<root->product.id?searchAVL(root->left,id):searchAVL(root->right,id);
+}
+
+void inorderDisplay(AVLNode* root){
+    if(!root) return;
+    inorderDisplay(root->left);
+    printf("ID:%-5d | %-20s | Qty:%-4d | Rs.%-8.2f | %s",
+           root->product.id,root->product.name,root->product.quantity,
+           root->product.price,root->product.description);
+    if(root->product.quantity<=LOW_STOCK_LIMIT)
+        printf(" Low Stock!\n");
+    else printf("\n");
+    inorderDisplay(root->right);
+}
+
+// ---------- FILE HANDLING ----------
+void saveToFile(AVLNode* root, FILE* f){
+    if(!root) return;
+    saveToFile(root->left,f);
+    fprintf(f,"%d,%s,%d,%.2f,%s\n",root->product.id,root->product.name,
+            root->product.quantity,root->product.price,root->product.description);
+    saveToFile(root->right,f);
+}
+
+void saveInventory(AVLNode* root){
+    FILE* f=fopen(FILE_INVENTORY,"w");
+    if(!f){ printf("Error saving inventory!\n"); return; }
+    saveToFile(root,f);
+    fclose(f);
+}
+
+AVLNode* loadFromFile(){
+    FILE* f=fopen(FILE_INVENTORY,"r");
+    if(!f) return NULL;
+    AVLNode* root=NULL; Product p;
+    while(fscanf(f,"%d,%49[^,],%d,%f,%99[^\n]\n",
+                 &p.id,p.name,&p.quantity,&p.price,p.description)==5){
+        root=insertAVL(root,p);
+    }
+    fclose(f);
+    return root;
+}
+
+// ---------- QUEUE ----------
+Queue* createQueue(){ Queue* q=malloc(sizeof(Queue)); q->front=q->rear=NULL; q->count=0; return q; }
+
+void enqueue(Queue* q,int pid,int qty,const char* cname){
+    QueueNode* n=malloc(sizeof(QueueNode));
+    n->orderId=nextOrderId++; n->productId=pid; n->quantity=qty;
+    strcpy(n->customerName,cname); n->next=NULL;
+    if(!q->rear) q->front=q->rear=n;
+    else{ q->rear->next=n; q->rear=n; }
     q->count++;
-printf("\nDelivery order #%d added to queue.\n", newNode->orderId);
+
+    FILE* f=fopen(FILE_DELIVERIES,"a");
+    if(f){ fprintf(f,"%d,%s,%d,%d\n",n->orderId,n->customerName,n->productId,n->quantity); fclose(f); }
+
+    printf("Order #%d added for %s\n",n->orderId,cname);
 }
 
-void dequeue(Queue* q) 
-{
-    if(q->front==NULL)
-{
-printf("\nNo delivery orders in queue.\n");
-     return;
+void dequeue(Queue* q,AVLNode* root){
+    if(!q->front){ printf("No pending deliveries.\n"); return; }
+    QueueNode* t=q->front;
+    AVLNode* p=searchAVL(root,t->productId);
+    if(!p) printf("Product %d not found.\n",t->productId);
+    else if(p->product.quantity<t->quantity)
+        printf("Insufficient stock for %s (Need:%d, Have:%d)\n",
+               p->product.name,t->quantity,p->product.quantity);
+    else{
+        p->product.quantity -= t->quantity;
+        printf("→ Delivered Order #%d | %s | %s x%d | Remaining:%d\n",
+               t->orderId,t->customerName,p->product.name,t->quantity,p->product.quantity);
+        if(p->product.quantity<=LOW_STOCK_LIMIT)
+            printf("Low stock alert for %s! Only %d left.\n",
+                   p->product.name,p->product.quantity);
+        saveInventory(root);   // auto-save after each delivery
     }
-    QueueNode* temp=q->front;
-printf("\nProcessing Order #%d (Customer: %s, Product ID: %d, Quantity: %d)\n",temp->orderId, temp->customerName, temp->productId, temp->quantity);
-q->front=q->front->next;
-if(q->front==NULL)
-q->rear=NULL;
-    free(temp);
-    q->count--;
+    q->front=q->front->next;
+    if(!q->front) q->rear=NULL;
+    free(t); q->count--;
 }
 
-void displayQueue(Queue* q)
- {
-    if(q->front==NULL)
- {
-    printf("\n No delivery orders.\n");
-    return;
-    }
-
-QueueNode* current=q->front;
- printf("\nDELIVERY QUEUE:\n");
-  while(current!=NULL)
- {
- printf("Order #%d - %s (Product ID: %d, Qty: %d)\n",current->orderId, current->customerName, current->productId, current->quantity);
- current = current->next;
+void displayQueue(Queue* q){
+    if(!q->front){ printf("No pending deliveries.\n"); return; }
+    printf("\nPending Deliveries:\n");
+    QueueNode* t=q->front;
+    while(t){
+        printf("Order#%d | %s | ProductID:%d | Qty:%d\n",
+               t->orderId,t->customerName,t->productId,t->quantity);
+        t=t->next;
     }
 }
 
-PriorityQueue* createPriorityQueue()
-{
-    PriorityQueue* pq=(PriorityQueue*)malloc(sizeof(PriorityQueue));
-    pq->head=NULL;
-   pq->count=0;
-   return pq;
-}
+// ---------- AUTH UI ----------
+void authMenu(){
+    int aChoice;
+    while(!isLoggedIn){
+        printf("\n=== LOGIN MENU ===\n1.Login\n2.Register (admin only)\n0.Exit\n> ");
+        scanf("%d",&aChoice);
+        if(aChoice==1){
+            char uname[MAX_NAME], pwd[100], roleOut[10];
+            printf("Username: "); scanf(" %49s", uname);
+            printf("Password: "); scanf(" %99s", pwd);
+            if(authenticateUser(uname, pwd, roleOut)){
+                isLoggedIn = 1;
+                strcpy(currentUser, uname);
+                strcpy(currentRole, roleOut);
+                printf("✓ Logged in as %s (%s)\n", currentUser, currentRole);
+                return;
+            } else {
+                printf("✗ Invalid credentials.\n");
+            }
+        } else if(aChoice==2){
+            // To register we require an admin to already exist or first-time setup.
+            // If users file is empty: allow creation of first admin.
+            FILE* f = fopen(FILE_USERS, "r");
+            int users_exist = (f != NULL);
+            if(f) fclose(f);
 
-void priorityEnqueue(PriorityQueue* pq, int productId, int quantity, int priority, char* customerName)
- {
-    PQNode* newNode=(PQNode*)malloc(sizeof(PQNode));
-    newNode->orderId=nextOrderId++;
-    newNode->productId=productId;
-    newNode->quantity=quantity;
-    newNode->priority=priority;
-    strcpy(newNode->customerName,customerName);
-   newNode->next = NULL;
-    if (pq->head==NULL||priority<pq->head->priority) 
-{
-    newNode->next=pq->head;
-     pq->head=newNode;
-    } 
-else
-{
- PQNode* current=pq->head;
-while (current->next != NULL && current->next->priority <=priority)
-{
-    current = current->next;
-}
-  newNode->next=current->next;
-    current->next=newNode;
+            if(!users_exist){
+                // First admin creation
+                char uname[MAX_NAME], pwd[100];
+                printf("No users found. Create initial admin account.\n");
+                printf("New admin username: "); scanf(" %49s", uname);
+                printf("New admin password: "); scanf(" %99s", pwd);
+                if(registerUserToFile(uname, pwd, "admin")) printf("Admin created. Please login.\n");
+                else printf("Failed to create admin.\n");
+            } else {
+                // Regular register: allow only when an admin is logged in.
+                if(!isLoggedIn || strcmp(currentRole, "admin")!=0){
+                    printf("Only an admin can register new users. Please ask an admin to create the account or login as admin.\n");
+                } else {
+                    char uname[MAX_NAME], pwd[100], role[10];
+                    printf("New username: "); scanf(" %49s", uname);
+                    printf("Password: "); scanf(" %99s", pwd);
+                    printf("Role (admin/staff): "); scanf(" %9s", role);
+                    if(strcmp(role,"admin")!=0 && strcmp(role,"staff")!=0){
+                        printf("Invalid role. Must be 'admin' or 'staff'.\n");
+                    } else {
+                        if(registerUserToFile(uname, pwd, role)) printf("User %s created with role %s.\n", uname, role);
+                        else printf("User already exists or error.\n");
+                    }
+                }
+            }
+        } else if(aChoice==0){
+            printf("Goodbye!\n"); exit(0);
+        } else printf("Invalid choice.\n");
     }
-    pq->count++;
-    printf("\n Priority order #%d added (Priority %d)\n", newNode->orderId, priority);
 }
 
-void priorityDequeue(PriorityQueue* pq)
-{
- if(pq->head==NULL)
-  {
-    printf("\n No urgent/express orders.\n");
-    }
+// ---------- MAIN ----------
+int main(){
+    AVLNode* root=loadFromFile();
+    Queue* dq=createQueue();
 
-PQNode* temp=pq->head;
-printf("\n→ Processing Priority %d Order #%d (Customer: %s, Product ID: %d, Qty: %d)\n",temp->priority, temp->orderId, temp->customerName, temp->productId, temp->quantity);
- pq->head=pq->head->next;
-  free(temp);
-    pq->count--;
-}
+    printf("\n=== C-VENTORY ADVANCED INVENTORY SYSTEM ===\n");
 
-void displayPriorityQueue(PriorityQueue* pq)
- {
-    if (pq->head==NULL)
-    {
-     printf("\n No priority orders.\n");
-    return;
-    }
+    // Authenticate before showing main menu
+    authMenu();
 
-    PQNode* current=pq->head;
-    printf("\n PRIORITY QUEUE:\n");
-    while(current!=NULL) 
-{
- printf("[Priority %d] Order #%d - %s (Product ID: %d, Qty: %d)\n",current->priority, current->orderId, current->customerName, current->productId, current->quantity);
- current = current->next;
-}
-}
+    int ch;
+    do{
+        printf("\n1.Add Product\n2.Remove Product\n3.Search Product\n4.Update Product\n");
+        printf("5.Display All\n6.Add Delivery\n7.Process Delivery\n8.View Queue\n9.User Management (admin)\n10.Logout\n0.Exit\n> ");
+        scanf("%d",&ch);
 
-void addProduct() 
- {
-    Product p;
-    printf("\nEnter Product ID: ");
-    scanf("%d",&p.id);
-    if(hashSearch(hashTable,p.id)) {
-  printf(" Product already exists!\n");
-        
-    }
+        if(ch==1){
+            // Only staff or admin can add product (both allowed)
+            Product p;
+            printf("Enter ID: "); scanf("%d",&p.id);
+            printf("Enter Name: "); scanf(" %49[^\n]",p.name);
+            printf("Enter Qty: "); scanf("%d",&p.quantity);
+            printf("Enter Price: "); scanf("%f",&p.price);
+            printf("Enter Desc: "); scanf(" %99[^\n]",p.description);
+            root=insertAVL(root,p);
+            saveInventory(root);
+            if(p.quantity<=LOW_STOCK_LIMIT)
+                printf(" Low stock alert! Only %d units of %s\n",p.quantity,p.name);
+        }
+        else if(ch==2){
+            // Only admin allowed to delete products
+            if(strcmp(currentRole,"admin")!=0){
+                printf("Only admin can delete products.\n");
+            } else {
+                int id; printf("Enter ID to delete: "); scanf("%d",&id);
+                root=deleteAVL(root,id); saveInventory(root);
+                printf("Product deleted (if existed).\n");
+            }
+        }
+        else if(ch==3){
+            int id; printf("Enter ID to search: "); scanf("%d",&id);
+            AVLNode* n=searchAVL(root,id);
+            if(n){
+                printf("%s | Qty:%d | Rs:%.2f | %s\n",
+                       n->product.name,n->product.quantity,
+                       n->product.price,n->product.description);
+                if(n->product.quantity<=LOW_STOCK_LIMIT)
+                    printf("Low stock!\n");
+            } else printf("Not found.\n");
+        }
+        else if(ch==4){
+            int id; printf("Enter ID to update: "); scanf("%d",&id);
+            AVLNode* n=searchAVL(root,id);
+            if(!n) printf("Not found.\n");
+            else{
+                printf("New Qty: "); scanf("%d",&n->product.quantity);
+                printf("New Price: "); scanf("%f",&n->product.price);
+                saveInventory(root);
+                printf("Updated.\n");
+                if(n->product.quantity<=LOW_STOCK_LIMIT)
+                    printf("Low stock alert! Only %d left.\n",n->product.quantity);
+            }
+        }
+        else if(ch==5) inorderDisplay(root);
+        else if(ch==6){
+            int pid,qty; char cname[MAX_NAME];
+            printf("Product ID: "); scanf("%d",&pid);
+            AVLNode* prod = searchAVL(root,pid);
+            if(!prod){
+                printf("Cannot add delivery — Product ID %d not found in inventory.\n", pid);
+                continue;
+            }
+            printf("Qty: "); scanf("%d",&qty);
+            if(qty > prod->product.quantity){
+                printf("✗ Insufficient stock! Available: %d, Requested: %d\n", prod->product.quantity, qty);
+                continue;
+            }
+            printf("Customer: "); scanf(" %49[^\n]",cname);
+            enqueue(dq,pid,qty,cname);
+        }
+        else if(ch==7) dequeue(dq,root);
+        else if(ch==8) displayQueue(dq);
+        else if(ch==9){
+            // Admin-only user management menu
+            if(strcmp(currentRole,"admin")!=0){
+                printf("Only admin can access user management.\n");
+            } else {
+                int um;
+                printf("\nUser Management:\n1.Create User\n0.Back\n> ");
+                scanf("%d",&um);
+                if(um==1){
+                    char uname[MAX_NAME], pwd[100], role[10];
+                    printf("New username: "); scanf(" %49s", uname);
+                    printf("Password: "); scanf(" %99s", pwd);
+                    printf("Role (admin/staff): "); scanf(" %9s", role);
+                    if(strcmp(role,"admin")!=0 && strcmp(role,"staff")!=0) printf("Invalid role.\n");
+                    else if(registerUserToFile(uname, pwd, role)) printf("User created.\n");
+                    else printf("User exists or error.\n");
+                }
+            }
+        }
+        else if(ch==10){
+            // Logout: reset state and force re-authentication
+            isLoggedIn = 0;
+            currentUser[0] = '\0';
+            currentRole[0] = '\0';
+            printf("Logged out.\n");
+            authMenu();
+        }
+        else if(ch==0){ saveInventory(root); printf("✓ Data saved. Goodbye!\n"); }
+        else printf("Invalid choice!\n");
+    }while(ch!=0);
 
- printf("Enter Product Name: ");
- scanf(" %[^\n]", p.name);
- printf("Enter Quantity: ");
-scanf("%d", &p.quantity);
-printf("Enter Price: ");
-scanf("%f", &p.price);
- printf("Enter Description: ");
-scanf(" %[^\n]", p.description);
-
- hashInsert(hashTable, p);
-avlRoot=avlInsert(avlRoot, p);
-printf("\n Product added successfully\n");
-}
-
-void removeProduct()
- {
-    int id;
-    printf("\nEnter Product ID to remove: ");
-    scanf("%d",&id);
-    Product* p=hashSearch(hashTable, id);
-if(!p)
-{
- printf("✗ Product not found!\n");
-  
-    }
- hashDelete(hashTable, id);
-avlRoot = avlDelete(avlRoot, id);
-printf("\n Product removed successfully\n");
-}
-
-void searchProduct() {
-    int id;
-    printf("\nEnter Product ID: ");
-    scanf("%d", &id);
-    Product* p = hashSearch(hashTable, id);
-    if (p)
-        printf("ID: %d\nName: %s\nQty: %d\nPrice: %.2f\nDescription: %s\n",
-               p->id, p->name, p->quantity, p->price, p->description);
-    else
-        printf("✗ Product not found!\n");
-}
-
-void updateProduct() {
-    int id, newQty;
-    float newPrice;
-    printf("\nEnter Product ID: ");
-    scanf("%d",&id);
-    Product* p=hashSearch(hashTable, id);
-if (!p)
-{
-printf(" Product not found!\n");
-return;
-}
-printf("Enter new Quantity: ");
-scanf("%d",&newQty);
-printf("Enter new Price: ");
-scanf("%f",&newPrice);
- hashUpdate(hashTable, id, newQty, newPrice);
-printf("Product updated successfully!\n");
-}
-
-void displayAllProducts()
- {
-    printf("\nALL PRODUCTS (Sorted by ID):\n");
-if(avlRoot==NULL)
-printf("No products available.\n");
-else
-inorderTraversal(avlRoot);
-}
-
-void cleanup() 
-{
-for(int i=0;i<HASH_SIZE;i++)
- {
- HashNode* current=hashTable->table[i];
-while(current)
-{
-    HashNode* temp=current;
-    current=current->next;
-    free(temp);
- }
-}
-free(hashTable);
-}
-
-void displayMenu()
- {
-    printf("\nC-VENTORY: INVENTORY MANAGEMENT SYSTEM\n");
-    printf("1. Add Product\n2. Remove Product\n3. Search Product\n4. Update Product\n5. Display All Products\n6. Add Delivery Order\n7. Process Delivery Order\n8. View Delivery Queue\n9. Add Priority Order\n10. Process Priority Order\n11. View Priority Queue\n0. Exit\n");
-    printf("Enter your choice: ");
-}
-
-int main() 
-{
-  hashTable = createHashTable();
-  deliveryQueue = createQueue();
-  urgentQueue = createPriorityQueue();
-int choice;
- printf("WELCOME TO C-VENTORY\n");
-do
-{
- displayMenu();
-scanf("%d", &choice);
- switch (choice)
-  {
-    case 1: 
-    addProduct();
-    break;
-   case 2: 
-    removeProduct();
-    break;
-    case 3:
-    searchProduct();
-    break;
-    case 4:updateProduct();
-     break;
-    case 5: 
-    displayAllProducts(); 
-    break;
-    case 6:
-{
-int id, qty; char name[MAX_NAME];
-  printf("Enter Product ID: "); scanf("%d", &id);
-printf("Enter Quantity: "); scanf("%d", &qty);
- printf("Enter Customer Name: "); scanf(" %[^\n]", name);
-enqueue(deliveryQueue, id, qty, name);
- break;
-}
-case 7:
-dequeue(deliveryQueue); 
- break;
-
-case 8:
- displayQueue(deliveryQueue);
-  break;
-
-case 9:
- {
-    int id, qty, priority; char name[MAX_NAME];
-printf("Enter Product ID: "); scanf("%d", &id);
- printf("Enter Quantity: "); scanf("%d", &qty);
- printf("Enter Priority(1=Urgent,2=Express,3=Normal): "); 
- scanf("%d", &priority);
-printf("Enter Customer Name: ");
- scanf(" %[^\n]", name);
-priorityEnqueue(urgentQueue, id, qty, priority, name);
-break;
- }
- case 10:
-  priorityDequeue(urgentQueue);
- break;
-            
- case 11:
-  displayPriorityQueue(urgentQueue);
- break;
-            
- case 0: 
-printf("\nExiting Thank you\n"); cleanup(); 
-break;
-default: printf("Invalid choice!\n");
-   }
-    }
-while (choice != 0);
-return 0;
+    return 0;
 }
